@@ -432,6 +432,60 @@ class TestOpenCL(unittest.TestCase):
 
         # print("\n{0:0.1f} ms".format((time.time()-startTime)*1000))
 
+    def test_16_call_random_value_with_same_seeds_buffer_should_give_same_results(self):
+        """
+        In an other project, we had a random number generator that was failing.  I am testing it here.
+
+        """
+        program_source =  """
+
+            uint wangHash(uint seed){
+                seed = (seed ^ 61) ^ (seed >> 16);
+                seed *= 9;
+                seed = seed ^ (seed >> 4);
+                seed *= 0x27d4eb2d;
+                seed = seed ^ (seed >> 15);
+                return seed;
+            }
+
+            float getRandomFloatValue(__global unsigned int *seeds, int id){
+                 float result = 0.0f;
+                 while(result == 0.0f){
+                     uint rnd_seed = wangHash(seeds[id]);
+                     seeds[id] = rnd_seed;
+                     result = (float)rnd_seed / (float)UINT_MAX;
+                 }
+                 return result;
+            }
+
+            // ----------------- TEST KERNELS -----------------
+
+             __kernel void fillRandomFloatBuffer(__global unsigned int *seeds, __global float *randomNumbers){
+                int id = get_global_id(0);
+                randomNumbers[id] = getRandomFloatValue(seeds, id);
+            }
+            """
+        program = pycl.Program(self.context, program_source).build()
+        nWorkUnits = 16 # NOT A MULTIPLE of 32
+
+        queue = pycl.CommandQueue(self.context)
+
+        seedsBuffer1 = clArray(cq=queue, shape=(nWorkUnits,), dtype=cl.cltypes.uint)
+        for i in range(nWorkUnits):
+            seedsBuffer1[i] = i
+        seedsBuffer2 = clArray(cq=queue, shape=(nWorkUnits,), dtype=cl.cltypes.uint)
+        for i in range(nWorkUnits):
+            seedsBuffer2[i] = i
+
+        valueBuffer1 = clArray(cq=queue, shape=(nWorkUnits,), dtype=np.float32)
+        valueBuffer2 = clArray(cq=queue, shape=(nWorkUnits,), dtype=np.float32)
+
+        knl = program.fillRandomFloatBuffer
+
+        knl(queue, (nWorkUnits,), None, seedsBuffer1.data, valueBuffer1.data)
+        knl(queue, (nWorkUnits,), None, seedsBuffer2.data, valueBuffer2.data)
+
+        self.assertTrue( all(valueBuffer1==valueBuffer2))
 
 
 class TestOpenCLIds(unittest.TestCase):
@@ -624,7 +678,6 @@ class TestOpenCLIds(unittest.TestCase):
         for i, value in enumerate(valueBuffer):
             self.assertEqual(value, i)
 
-    @unittest.expectedFailure
     def test_07_compute_global_id_from_local_id_NON_uniform_sizes(self):
         """
         Computing the global_id from the local_id in a non-uniform computation
@@ -645,66 +698,14 @@ class TestOpenCLIds(unittest.TestCase):
         knl = self.program.test_compute_global_id_from_local_id_nonuniform # copy local_id into array
         knl(queue, (nWorkUnits,), None, valueBuffer.data, local_sizes.data)
 
-        # This is fine
-        self.assertEqual(np.sum(local_sizes.hostBuffer), nWorkUnits)
+        # This is fine: IN THE END, local_sizes is correct
+        self.assertEqual(np.sum(local_sizes), nWorkUnits)
 
         # But this is not: the calculated global_id is incorrect
-        for i, value in enumerate(valueBuffer):
-            self.assertEqual(value, i)
-
-
-    def test_08_call_random_value_with_same_seeds_buffer_should_give_same_results(self):
-        """
-        In an other project, we had a random number generator that was failing.  I am testing it here.
-
-        """
-        self.program_source =  """
-
-            uint wangHash(uint seed){
-                seed = (seed ^ 61) ^ (seed >> 16);
-                seed *= 9;
-                seed = seed ^ (seed >> 4);
-                seed *= 0x27d4eb2d;
-                seed = seed ^ (seed >> 15);
-                return seed;
-            }
-
-            float getRandomFloatValue(__global unsigned int *seeds, int id){
-                 float result = 0.0f;
-                 while(result == 0.0f){
-                     uint rnd_seed = wangHash(seeds[id]);
-                     seeds[id] = rnd_seed;
-                     result = (float)rnd_seed / (float)UINT_MAX;
-                 }
-                 return result;
-            }
-
-            // ----------------- TEST KERNELS -----------------
-
-             __kernel void fillRandomFloatBuffer(__global unsigned int *seeds, __global float *randomNumbers){
-                int id = get_global_id(0);
-                randomNumbers[id] = getRandomFloatValue(seeds, id);
-            }
-            """
-        self.program = pycl.Program(self.context, self.program_source).build()
-        nWorkUnits = 16 # NOT A MULTIPLE of 32
-
-        seedsBuffer1 = clArray(cq=self.queue, shape=(nWorkUnits,), dtype=cl.cltypes.uint)
-        for i in range(nWorkUnits):
-            seedsBuffer1[i] = i
-        seedsBuffer2 = clArray(cq=self.queue, shape=(nWorkUnits,), dtype=cl.cltypes.uint)
-        for i in range(nWorkUnits):
-            seedsBuffer2[i] = i
-
-        valueBuffer1 = clArray(cq=self.queue, shape=(nWorkUnits,), dtype=np.float32)
-        valueBuffer2 = clArray(cq=self.queue, shape=(nWorkUnits,), dtype=np.float32)
-
-        knl = self.program.fillRandomFloatBuffer
-
-        knl(self.queue, (nWorkUnits,), None, seedsBuffer1.data, valueBuffer1.data)
-        knl(self.queue, (nWorkUnits,), None, seedsBuffer2.data, valueBuffer2.data)
-
-        self.assertTrue( all(valueBuffer1==valueBuffer2))
+        # because during the computation, local_sizes is not completed in order.
+        with self.assertRaises(Exception):
+            for i, value in enumerate(valueBuffer):
+                self.assertEqual(value, i)
 
 if __name__ == "__main__":
     unittest.main()
